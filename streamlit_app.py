@@ -164,7 +164,7 @@ except (KeyError, FileNotFoundError):
 
 APP_METADATA_CONTAINER_NAME = "app-metadata"
 # Define the list of applications the editor will manage.
-SUPPORTED_APPS = ["mmx", "FAST", "salesmate"]
+SUPPORTED_APPS = ["mmx", "FAST", "salesmate","mmm1"]
 
 # Check if the connection string was loaded
 if not AZURE_STORAGE_CONNECTION_STRING:
