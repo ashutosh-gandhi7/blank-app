@@ -162,9 +162,22 @@ except (KeyError, FileNotFoundError):
     st.error("Azure Storage Connection String is not configured. Please set it in your Streamlit secrets.")
     st.stop()
 
-APP_METADATA_CONTAINER_NAME = "app-metadata"
+# APP_METADATA_CONTAINER_NAME = "app-metadata"
 # Define the list of applications the editor will manage.
 SUPPORTED_APPS = ["mmx", "FAST", "salesmate","mmm1"]
+
+ENVIRONMENTS = ["dev", "qa", "prod"]
+selected_env = st.sidebar.selectbox("Select Environment:", ENVIRONMENTS, index=0)
+
+# Determine which container to use
+if selected_env == "dev":
+    APP_METADATA_CONTAINER_NAME = "app-metadata"
+elif selected_env == "qa":
+    APP_METADATA_CONTAINER_NAME = "app-metadata-qa"
+else:
+    APP_METADATA_CONTAINER_NAME = "app-metadata-prod"
+
+st.sidebar.info(f"Active container: {APP_METADATA_CONTAINER_NAME}")
 
 # Check if the connection string was loaded
 if not AZURE_STORAGE_CONNECTION_STRING:
@@ -185,7 +198,7 @@ def get_blob_prefix(app_name: str) -> str:
 # --- Azure Blob Storage Functions ---
 
 @st.cache_data(ttl=300) # Cache for 5 minutes
-def download_latest_prompt_repo_from_blob(app_name: str):
+def download_latest_prompt_repo_from_blob(app_name: str,env: str):
     """Downloads and parses the latest prompt JSON blob for a specific app."""
     try:
         blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
@@ -272,7 +285,7 @@ if 'current_app' not in st.session_state or st.session_state.current_app != sele
 
 with st.spinner(f"Loading data for '{selected_app_name}'..."):
     # `full_data` holds the entire JSON structure, e.g., {"APPS": [...]}
-    full_data = download_latest_prompt_repo_from_blob(selected_app_name)
+    full_data = download_latest_prompt_repo_from_blob(selected_app_name,selected_env)
 
 # Find the specific app's data within the loaded structure
 app_data = next((app for app in full_data.get("APPS", []) if app.get("name", "").lower() == selected_app_name.lower()), None)
