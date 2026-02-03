@@ -43,6 +43,22 @@ def validate_metadata_json(data, target_app_name):
 
     return True, "✅ Valid"
 
+
+def check_chroma_status(app_name, env):
+    """Fetches the current background task status from the backend."""
+    base_url = get_api_base_url(env)
+    url = f"{base_url}/admin/chroma/status/{app_name}"
+    
+    try:
+        # Simple GET request, usually no auth needed for status, 
+        # but you can add the admin header if you secured the GET route too.
+        resp = requests.get(url, timeout=3)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "unknown", "message": "Could not reach server."}
+    except Exception:
+        return {"status": "error", "message": "Connection failed."}
+
 def trigger_cache_clear(app_name, env):
     """Calls backend to clear cache."""
     base_url = get_api_base_url(env)
@@ -661,7 +677,29 @@ with tab_metadata:
         
         st.divider()
         
-        if st.button("🚀 Populate Chroma", type="primary"):
+        if st.button("🚀 Start Job", type="primary"):
             trigger_chroma_populate(write_app_name, selected_env)
         
-        st.caption("This triggers a background task on the server.")
+        st.divider()
+        
+        # --- STATUS DISPLAY ---
+        st.markdown("**Job Status**")
+        
+        # Auto-fetch status on page load (optional) or use a button
+        if st.button("🔄 Refresh Status"):
+            status_data = check_chroma_status(write_app_name, selected_env)
+            
+            state = status_data.get("status", "idle")
+            msg = status_data.get("message", "")
+            time_log = status_data.get("timestamp", "")
+            
+            if state == "running":
+                st.warning(f"🟡 **Running**\n\n{msg}")
+            elif state == "completed":
+                st.success(f"🟢 **Completed**\n\n{msg}")
+                if time_log:
+                    st.caption(f"Finished: {time_log}")
+            elif state == "failed":
+                st.error(f"🔴 **Failed**\n\nError: {msg}")
+            else:
+                st.info(f"⚪ **Idle**\n\n{msg}")
