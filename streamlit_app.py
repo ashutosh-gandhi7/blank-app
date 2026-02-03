@@ -17,6 +17,32 @@ def get_api_base_url(env):
     }
     return api_map.get(env, api_map["dev"])
 
+def validate_metadata_json(data, target_app_name):
+    """
+    Validates that the JSON follows the strict structure required by metadata.py.
+    Rule 1: Root must be a dictionary.
+    Rule 2: Must contain a root key matching the Uppercase App Name (e.g., "MMM").
+    Rule 3: The content of that key must be a list of tables.
+    """
+    if not isinstance(data, dict):
+        return False, "❌ Invalid Root: The file must be a JSON object."
+
+    # Logic from metadata.py: json_key = app_name.strip().upper()
+    required_key = target_app_name.strip().upper()
+    
+    if required_key not in data:
+        # Check if they used lowercase by mistake to give a helpful error
+        found_keys = [k for k in data.keys() if k.lower() == target_app_name.lower()]
+        if found_keys:
+            return False, f"❌ Casing Error: Found key '{found_keys[0]}', but system requires ALL CAPS: '{required_key}'."
+        return False, f"❌ Missing Root Key: JSON must contain the key '{required_key}' at the root."
+
+    # Check if the content is a list (standard metadata structure)
+    if not isinstance(data[required_key], list):
+         return False, f"❌ Invalid Structure: The value for '{required_key}' must be a list of tables."
+
+    return True, "✅ Valid"
+
 def trigger_cache_clear(app_name, env):
     """Calls backend to clear cache."""
     base_url = get_api_base_url(env)
@@ -602,7 +628,7 @@ with tab_metadata:
         
         if metadata_json is None:
             st.warning("Metadata file not found. Creating new.")
-            json_str = "{}"
+            json_str = json.dumps({selected_app_name.upper(): []}, indent=4)
         else:
             json_str = json.dumps(metadata_json, indent=4)
             
@@ -611,11 +637,16 @@ with tab_metadata:
         if st.button("💾 Save Metadata"):
             try:
                 data_to_save = json.loads(edited_meta)
-                if upload_metadata(write_app_name, data_to_save, selected_env):
-                    st.success("Metadata uploaded successfully!")
-                    trigger_cache_clear(write_app_name, selected_env)
+                is_valid, message = validate_metadata_json(data_to_save, read_app_name)
+                if not is_valid:
+                    st.error(message) # Block upload if invalid
                 else:
-                    st.error("Upload failed.")
+                    # 2. Proceed to Upload if Valid
+                    if upload_metadata(write_app_name, data_to_save, selected_env):
+                        st.success(f"Metadata uploaded successfully! ({message})")
+                        trigger_cache_clear(write_app_name, selected_env)
+                    else:
+                        st.error("Upload failed due to connection error.")
             except json.JSONDecodeError:
                 st.error("Invalid JSON Format.")
     
