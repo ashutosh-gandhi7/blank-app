@@ -7,18 +7,19 @@ from botocore.exceptions import ClientError
 from azure.storage.blob import BlobServiceClient
 import requests
 
-def trigger_cache_clear(app_name, env):
-    """Calls backend to clear cache."""
-    # Define your API URLs mapping
+def get_api_base_url(env):
+    """Returns the backend API URL for the selected environment."""
     api_map = {
         "dev": "https://ciathciaidevbeca01.thankfulisland-b0727d92.eastus2.azurecontainerapps.io", 
         "qa": "https://ciathciaitstbeca01.thankfulisland-b0727d92.eastus2.azurecontainerapps.io",
         "prod": "https://ciathciaiprdbeca01.thankfulisland-b0727d92.eastus2.azurecontainerapps.io",
         "aws": "https://ciathena.info:8000"
     }
-    
-    # Get URL (Default to dev if missing)
-    base_url = api_map.get(env, "https://ciathciaidevbeca01.thankfulisland-b0727d92.eastus2.azurecontainerapps.io")
+    return api_map.get(env, api_map["dev"])
+
+def trigger_cache_clear(app_name, env):
+    """Calls backend to clear cache."""
+    base_url = get_api_base_url(env)
     url = f"{base_url}/admin/cache/clear"
     
     try:
@@ -35,6 +36,29 @@ def trigger_cache_clear(app_name, env):
                 st.error(f"Cache Clear Failed: {resp.text}")
     except Exception as e:
         st.error(f"API Error: {str(e)}")
+
+def trigger_chroma_populate(app_name, env):
+    """Calls backend to populate ChromaDB."""
+    base_url = get_api_base_url(env)
+    url = f"{base_url}/admin/chroma/populate"
+    
+    try:
+        with st.spinner(f"🚀 Triggering Chroma Population for {app_name} on {env.upper()}..."):
+            # This assumes you added the endpoint described in Part 1
+            resp = requests.post(
+                url, 
+                json={"app_name": app_name},
+                headers={"x-admin-token": "my-super-secret-admin-key-123"},
+                timeout=5 # fast timeout as it should be a background task
+            )
+            
+            if resp.status_code == 200:
+                st.success(f"✅ Job Started: {resp.json().get('message')}")
+                st.info("The process is running in the background. It may take a few minutes to complete.")
+            else:
+                st.error(f"Failed to trigger: {resp.text}")
+    except Exception as e:
+        st.error(f"API Connection Error: {str(e)}")
 
 # Set the page to wide layout. This must be the first Streamlit command.
 st.set_page_config(layout="wide")
@@ -170,6 +194,43 @@ def get_s3_client():
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         region_name=AWS_REGION
     )
+
+def get_blob_service_client():
+    return BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
+
+def download_metadata(app_name, env):
+    filename = f"{app_name.lower()}.json"
+    try:
+        if env == "aws":
+            s3 = get_s3_client()
+            obj = s3.get_object(Bucket=S3_BUCKET_NAME, Key=f"metadata/{filename}") # Assuming structure
+            return json.loads(obj['Body'].read().decode('utf-8'))
+        else:
+            blob_service = get_blob_service_client()
+            container = blob_service.get_container_client(APP_METADATA_CONTAINER_NAME)
+            blob = container.get_blob_client(filename)
+            if not blob.exists():
+                return None
+            return json.loads(blob.download_blob().readall())
+    except Exception as e:
+        return None # Return None if not found to handle UI gracefully
+
+def upload_metadata(app_name, data, env):
+    filename = f"{app_name.lower()}.json"
+    try:
+        json_data = json.dumps(data, indent=4)
+        if env == "aws":
+            s3 = get_s3_client()
+            s3.put_object(Bucket=S3_BUCKET_NAME, Key=f"metadata/{filename}", Body=json_data, ContentType='application/json')
+        else:
+            blob_service = get_blob_service_client()
+            container = blob_service.get_container_client(APP_METADATA_CONTAINER_NAME)
+            blob = container.get_blob_client(filename)
+            blob.upload_blob(json_data, overwrite=True)
+        return True
+    except Exception as e:
+        st.error(f"Upload failed: {e}")
+        return False
 
 def download_latest_from_s3(app_name: str):
     """Downloads the latest prompt JSON from S3, with fallback logic matching extract_prompt.py."""
@@ -379,148 +440,197 @@ if 'current_app_state' not in st.session_state or st.session_state.current_app_s
     if "preview_data" in st.session_state:
         del st.session_state.preview_data
 
+tab_prompts, tab_metadata = st.tabs(["💬 Prompt Editor", "🗄️ Metadata & Chroma"])
 # --- Load Data ---
-with st.spinner(f"Loading data for '{selected_app_name}' from {selected_env.upper()}..."):
-    full_data = download_data_dispatcher(read_app_name, selected_env)
+with tab_prompts:
+    with st.spinner(f"Loading data for '{selected_app_name}' from {selected_env.upper()}..."):
+        full_data = download_data_dispatcher(read_app_name, selected_env)
 
-# Find the specific app's data within the loaded structure
-# (Handling case-insensitive matching for app names)
-app_data = None
-if full_data and "APPS" in full_data:
-    app_data = next((app for app in full_data["APPS"] if app.get("name", "").lower() == read_app_name.lower()), None)
-
-st.subheader(f"Editing Prompts for: `{selected_app_name}` ({selected_env})")
-
-st.caption(
-    f"📥 Loading from: `{read_app_name}` | "
-    f"📤 Saving as: `{write_app_name}`"
-)
-
-if FORCE_MIGRATION_READ_FROM_ALIAS.get(selected_app_name.lower(), False):
-    st.warning("⚠️ Migration mode ON — loading from alias source")
-
-if app_data is None:
-    st.warning(f"Could not find data for '{selected_app_name}' in the loaded file. You can initialize it below.")
-    prompt_list = []
-else:
-    prompt_list = app_data.get("prompts", [])
-
-prompt_names = [p.get("name", f"Unnamed Prompt {i}") for i, p in enumerate(prompt_list)]
-
-# --- Prompt Editor ---
-if not prompt_names:
-    st.warning(f"No prompts found for '{selected_app_name}'. You can add one via the Raw JSON Editor.")
-else:
-    selected_prompt_name = st.selectbox(
-        "Select a prompt to edit:",
-        prompt_names,
-        key=f"prompt_select_{selected_app_name}"
-    )
-    selected_prompt_index = prompt_names.index(selected_prompt_name) if selected_prompt_name else -1
-
-    if selected_prompt_index != -1:
-        initial_content_str = "\n".join(prompt_list[selected_prompt_index].get("content", []))
-        
-        edited_content_str = st.text_area(
-            "Prompt Content:",
-            value=initial_content_str,
-            height=400,
-            key=f"editor_{selected_app_name}_{selected_prompt_name}"
-        )
-
-        if st.button("Upload Changes"):
-            if edited_content_str.strip() != initial_content_str.strip():
-                with st.spinner(f"Uploading changes for '{selected_app_name}'..."):
-                    updated_data = copy.deepcopy(full_data)
-                    
-                    # Ensure we have the structure to update
-                    if "APPS" not in updated_data:
-                         updated_data = {"APPS": [{"name": selected_app_name, "prompts": []}]}
-
-                    # Find the app to update within the copied data structure
-                    app_to_update = next((app for app in updated_data["APPS"] if app.get("name", "").lower() == read_app_name.lower()), None)
-                    
-                    if app_to_update:
-                        app_to_update["prompts"][selected_prompt_index]["content"] = edited_content_str.split('\n')
-                        app_to_update["name"] = write_app_name
-                        
-                        if upload_data_dispatcher(write_app_name, updated_data, selected_env):
-                            trigger_cache_clear(write_app_name, selected_env)
-                            st.cache_data.clear()
-                            st.rerun()
-                    else:
-                        st.error(f"Error: Structure mismatch during save.")
-            else:
-                st.info("No changes detected.")
-
-st.divider()
-
-# --- Raw JSON Editor and Version History ---
-col1, col2 = st.columns(2)
-with col1:
-    st.subheader("Previous Versions")
-    previous_blobs = fetch_history_dispatcher(read_app_name, selected_env)
-    
-    if previous_blobs:
-        selected_blob = st.selectbox("Select a version to preview", previous_blobs, key=f"version_select_{selected_app_name}")
-        if st.button("Preview Selected Version"):
-            with st.spinner(f"Loading preview for {selected_blob}..."):
-                st.session_state.preview_data = preview_dispatcher(selected_blob, selected_env)
-    else:
-        st.info(f"No previous versions found for '{selected_app_name}'.")
-
-    if "preview_data" in st.session_state and st.session_state.preview_data:
-        st.subheader("Preview")
-        st.json(st.session_state.preview_data, expanded=False)
-
-with col2:
-    st.subheader("Raw JSON Editor")
-    # Template logic
-    json_template = full_data
-    # If empty or new, provide a scaffold
-    has_app = False
+    # Find the specific app's data within the loaded structure
+    # (Handling case-insensitive matching for app names)
+    app_data = None
     if full_data and "APPS" in full_data:
-         has_app = any(app.get("name", "").lower() == selected_app_name.lower() for app in full_data["APPS"])
-    
-    if not has_app:
-        json_template = {
-            "APPS": [
-                {
-                    "name": selected_app_name,
-                    "prompts": [
-                        {
-                            "name": "EXAMPLE_PROMPT",
-                            "description": "An example description.",
-                            "location_identifier": "example.py/my_function()",
-                            "content": [
-                                "This is line 1.",
-                                "This is line 2."
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-    
-    edited_raw_json = st.text_area(
-        "Edit the full JSON object for this app:",
-        value=json.dumps(json_template, indent=2),
-        height=450,
-        key=f"raw_json_{selected_app_name}"
+        app_data = next((app for app in full_data["APPS"] if app.get("name", "").lower() == read_app_name.lower()), None)
+
+    st.subheader(f"Editing Prompts for: `{selected_app_name}` ({selected_env})")
+
+    st.caption(
+        f"📥 Loading from: `{read_app_name}` | "
+        f"📤 Saving as: `{write_app_name}`"
     )
-    if st.button("Upload Raw JSON"):
-        try:
-            new_data = json.loads(edited_raw_json)
-            # Basic validation
-            if "APPS" not in new_data or not isinstance(new_data["APPS"], list):
-                 st.error("Invalid JSON structure. Root must contain an 'APPS' list.")
-            else:
-                for app in new_data.get("APPS", []):
-                    if app.get("name", "").lower() == read_app_name.lower():
-                        app["name"] = write_app_name
-                if upload_data_dispatcher(write_app_name, new_data, selected_env):
+
+    if FORCE_MIGRATION_READ_FROM_ALIAS.get(selected_app_name.lower(), False):
+        st.warning("⚠️ Migration mode ON — loading from alias source")
+
+    if app_data is None:
+        st.warning(f"Could not find data for '{selected_app_name}' in the loaded file. You can initialize it below.")
+        prompt_list = []
+    else:
+        prompt_list = app_data.get("prompts", [])
+
+    prompt_names = [p.get("name", f"Unnamed Prompt {i}") for i, p in enumerate(prompt_list)]
+
+    # --- Prompt Editor ---
+    if not prompt_names:
+        st.warning(f"No prompts found for '{selected_app_name}'. You can add one via the Raw JSON Editor.")
+    else:
+        selected_prompt_name = st.selectbox(
+            "Select a prompt to edit:",
+            prompt_names,
+            key=f"prompt_select_{selected_app_name}"
+        )
+        selected_prompt_index = prompt_names.index(selected_prompt_name) if selected_prompt_name else -1
+
+        if selected_prompt_index != -1:
+            initial_content_str = "\n".join(prompt_list[selected_prompt_index].get("content", []))
+            
+            edited_content_str = st.text_area(
+                "Prompt Content:",
+                value=initial_content_str,
+                height=400,
+                key=f"editor_{selected_app_name}_{selected_prompt_name}"
+            )
+
+            if st.button("Upload Changes"):
+                if edited_content_str.strip() != initial_content_str.strip():
+                    with st.spinner(f"Uploading changes for '{selected_app_name}'..."):
+                        updated_data = copy.deepcopy(full_data)
+                        
+                        # Ensure we have the structure to update
+                        if "APPS" not in updated_data:
+                            updated_data = {"APPS": [{"name": selected_app_name, "prompts": []}]}
+
+                        # Find the app to update within the copied data structure
+                        app_to_update = next((app for app in updated_data["APPS"] if app.get("name", "").lower() == read_app_name.lower()), None)
+                        
+                        if app_to_update:
+                            app_to_update["prompts"][selected_prompt_index]["content"] = edited_content_str.split('\n')
+                            app_to_update["name"] = write_app_name
+                            
+                            if upload_data_dispatcher(write_app_name, updated_data, selected_env):
+                                trigger_cache_clear(write_app_name, selected_env)
+                                st.cache_data.clear()
+                                st.rerun()
+                        else:
+                            st.error(f"Error: Structure mismatch during save.")
+                else:
+                    st.info("No changes detected.")
+
+    st.divider()
+
+    # --- Raw JSON Editor and Version History ---
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Previous Versions")
+        previous_blobs = fetch_history_dispatcher(read_app_name, selected_env)
+        
+        if previous_blobs:
+            selected_blob = st.selectbox("Select a version to preview", previous_blobs, key=f"version_select_{selected_app_name}")
+            if st.button("Preview Selected Version"):
+                with st.spinner(f"Loading preview for {selected_blob}..."):
+                    st.session_state.preview_data = preview_dispatcher(selected_blob, selected_env)
+        else:
+            st.info(f"No previous versions found for '{selected_app_name}'.")
+
+        if "preview_data" in st.session_state and st.session_state.preview_data:
+            st.subheader("Preview")
+            st.json(st.session_state.preview_data, expanded=False)
+
+    with col2:
+        st.subheader("Raw JSON Editor")
+        # Template logic
+        json_template = full_data
+        # If empty or new, provide a scaffold
+        has_app = False
+        if full_data and "APPS" in full_data:
+            has_app = any(app.get("name", "").lower() == selected_app_name.lower() for app in full_data["APPS"])
+        
+        if not has_app:
+            json_template = {
+                "APPS": [
+                    {
+                        "name": selected_app_name,
+                        "prompts": [
+                            {
+                                "name": "EXAMPLE_PROMPT",
+                                "description": "An example description.",
+                                "location_identifier": "example.py/my_function()",
+                                "content": [
+                                    "This is line 1.",
+                                    "This is line 2."
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        
+        edited_raw_json = st.text_area(
+            "Edit the full JSON object for this app:",
+            value=json.dumps(json_template, indent=2),
+            height=450,
+            key=f"raw_json_{selected_app_name}"
+        )
+        if st.button("Upload Raw JSON"):
+            try:
+                new_data = json.loads(edited_raw_json)
+                # Basic validation
+                if "APPS" not in new_data or not isinstance(new_data["APPS"], list):
+                    st.error("Invalid JSON structure. Root must contain an 'APPS' list.")
+                else:
+                    for app in new_data.get("APPS", []):
+                        if app.get("name", "").lower() == read_app_name.lower():
+                            app["name"] = write_app_name
+                    if upload_data_dispatcher(write_app_name, new_data, selected_env):
+                        trigger_cache_clear(write_app_name, selected_env)
+                        st.cache_data.clear()
+                        st.rerun()
+            except json.JSONDecodeError:
+                st.error("Invalid JSON format. Please correct the syntax.")
+
+with tab_metadata:
+    st.subheader(f"Metadata Manager: `{selected_app_name}`")
+    
+    # 1. Load Metadata
+    with st.spinner("Loading metadata..."):
+        metadata_json = download_metadata(read_app_name, selected_env)
+    
+    col_edit, col_act = st.columns([3, 1])
+    
+    with col_edit:
+        st.markdown(f"**File:** `{read_app_name.lower()}.json` in `{APP_METADATA_CONTAINER_NAME if selected_env != 'aws' else S3_BUCKET_NAME}`")
+        
+        if metadata_json is None:
+            st.warning("Metadata file not found. Creating new.")
+            json_str = "{}"
+        else:
+            json_str = json.dumps(metadata_json, indent=4)
+            
+        edited_meta = st.text_area("Metadata JSON Editor", value=json_str, height=600)
+        
+        if st.button("💾 Save Metadata"):
+            try:
+                data_to_save = json.loads(edited_meta)
+                if upload_metadata(write_app_name, data_to_save, selected_env):
+                    st.success("Metadata uploaded successfully!")
                     trigger_cache_clear(write_app_name, selected_env)
-                    st.cache_data.clear()
-                    st.rerun()
-        except json.JSONDecodeError:
-            st.error("Invalid JSON format. Please correct the syntax.")
+                else:
+                    st.error("Upload failed.")
+            except json.JSONDecodeError:
+                st.error("Invalid JSON Format.")
+    
+    with col_act:
+        st.info("💡 **Chroma Automation**")
+        st.markdown("""
+        **Steps:**
+        1. Edit & Save JSON on the left.
+        2. Click button below.
+        3. Backend will re-index ChromaDB.
+        """)
+        
+        st.divider()
+        
+        if st.button("🚀 Populate Chroma", type="primary"):
+            trigger_chroma_populate(write_app_name, selected_env)
+        
+        st.caption("This triggers a background task on the server.")
