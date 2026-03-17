@@ -147,7 +147,7 @@ if not check_password():
 
 # --- Configuration & Environment Selection ---
 
-SUPPORTED_APPS = ["mmx", "FAST", "insightsai", "mmm", "patient_claims", "fast1", "insightsai1","ihub","salesmate","access_iq","insights_engine", "payer_spine", "kol", "data_stewardship", "gapd"]
+SUPPORTED_APPS = ["mmx", "FAST", "insightsai", "mmm", "patient_claims", "fast1", "insightsai1","ihub","salesmate","access_iq","insights_engine", "payer_spine", "kol", "data_stewardship", "gapd", "mr_insights_engine"]
 APP_NAME_ALIAS = {
     "fast": "fast1",   # UI fast → backend fast1 (Postgres)
     "fast1": "fast"
